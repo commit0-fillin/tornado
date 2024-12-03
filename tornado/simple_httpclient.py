@@ -38,7 +38,7 @@ class HTTPTimeoutError(HTTPError):
         super().__init__(599, message=message)
 
     def __str__(self) -> str:
-        return self.message or 'Timeout'
+        return self.message or f'HTTP {self.code}: Timeout'
 
 class HTTPStreamClosedError(HTTPError):
     """Error raised by SimpleAsyncHTTPClient when the underlying stream is closed.
@@ -105,7 +105,18 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
         :arg object key: A simple object to mark the request.
         :info string key: More detailed timeout information.
         """
-        pass
+        request = self.active.get(key)
+        if request is None:
+            return
+
+        self.active.pop(key)
+        timeout_response = HTTPResponse(
+            request, 599, error=HTTPTimeoutError("Timeout"),
+            request_time=self.io_loop.time() - request.start_time)
+        if info:
+            timeout_response.error.info = info
+
+        self.handle_response(request, timeout_response)
 
 class _HTTPConnection(httputil.HTTPMessageDelegate):
     _SUPPORTED_METHODS = set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -137,7 +148,18 @@ class _HTTPConnection(httputil.HTTPMessageDelegate):
 
         :info string key: More detailed timeout information.
         """
-        pass
+        error_message = "Timeout"
+        if info:
+            error_message += f": {info}"
+        
+        self.error = HTTPTimeoutError(error_message)
+        if self.final_callback is not None:
+            self.final_callback(self._format_error_response())
+        
+        if self.release_callback is not None:
+            self.release_callback()
+        
+        self._close_stream()
 if __name__ == '__main__':
     AsyncHTTPClient.configure(SimpleAsyncHTTPClient)
     main()
