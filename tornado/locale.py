@@ -50,7 +50,13 @@ def get(*locale_codes: str) -> 'Locale':
     the specified locales. You can change the default locale with
     `set_default_locale()`.
     """
-    pass
+    for code in locale_codes:
+        if code in _translations:
+            return _translations[code]
+        parts = code.split('_')
+        if len(parts) > 1 and parts[0] in _translations:
+            return _translations[parts[0]]
+    return _translations.get(_default_locale)
 
 def set_default_locale(code: str) -> None:
     """Sets the default locale.
@@ -60,7 +66,8 @@ def set_default_locale(code: str) -> None:
     the default locale to the destination locale. Consequently, you don't
     need to create a translation file for the default locale.
     """
-    pass
+    global _default_locale
+    _default_locale = code
 
 def load_translations(directory: str, encoding: Optional[str]=None) -> None:
     """Loads translations from CSV files in a directory.
@@ -97,7 +104,44 @@ def load_translations(directory: str, encoding: Optional[str]=None) -> None:
        Added ``encoding`` parameter. Added support for BOM-based encoding
        detection, UTF-16, and UTF-8-with-BOM.
     """
-    pass
+    import csv
+    import codecs
+    import os
+
+    for filename in os.listdir(directory):
+        if not filename.endswith('.csv'):
+            continue
+        locale = filename[:-4]
+        
+        if encoding is None:
+            # Try to detect the encoding
+            with open(os.path.join(directory, filename), 'rb') as f:
+                data = f.read()
+                if data.startswith(codecs.BOM_UTF8):
+                    encoding = 'utf-8-sig'
+                elif data.startswith(codecs.BOM_UTF16_LE) or data.startswith(codecs.BOM_UTF16_BE):
+                    encoding = 'utf-16'
+                else:
+                    encoding = 'utf-8'
+        
+        with open(os.path.join(directory, filename), 'r', encoding=encoding) as f:
+            reader = csv.reader(f)
+            translations = {}
+            for row in reader:
+                if len(row) == 3:
+                    english, translation, plural = row
+                    if plural not in ('singular', 'plural'):
+                        plural = 'unknown'
+                elif len(row) == 2:
+                    english, translation = row
+                    plural = 'unknown'
+                else:
+                    continue
+                translations.setdefault(english, {})
+                translations[english][plural] = translation
+            _translations[locale] = CSVLocale(locale, translations)
+    global _supported_locales
+    _supported_locales = frozenset(_translations.keys())
 
 def load_gettext_translations(directory: str, domain: str) -> None:
     """Loads translations from `gettext`'s locale tree
@@ -120,11 +164,27 @@ def load_gettext_translations(directory: str, domain: str) -> None:
 
         msgfmt mydomain.po -o {directory}/pt_BR/LC_MESSAGES/mydomain.mo
     """
-    pass
+    import gettext
+    import os
+    
+    for lang in os.listdir(directory):
+        if os.path.isfile(os.path.join(directory, lang)):
+            continue
+        try:
+            os.environ['LANGUAGE'] = lang
+            translation = gettext.translation(domain, directory, languages=[lang])
+            _translations[lang] = GettextLocale(lang, translation)
+        except Exception as e:
+            gen_log.error("Cannot load translation for '%s': %s", lang, str(e))
+            continue
+    global _supported_locales
+    _supported_locales = frozenset(_translations.keys())
+    global _use_gettext
+    _use_gettext = True
 
 def get_supported_locales() -> Iterable[str]:
     """Returns a list of all the supported locale codes."""
-    pass
+    return _supported_locales
 
 class Locale(object):
     """Object representing a locale.
@@ -137,7 +197,7 @@ class Locale(object):
     @classmethod
     def get_closest(cls, *locale_codes: str) -> 'Locale':
         """Returns the closest match for the given locale code."""
-        pass
+        return get(*locale_codes)
 
     @classmethod
     def get(cls, code: str) -> 'Locale':
@@ -145,7 +205,9 @@ class Locale(object):
 
         If it is not supported, we raise an exception.
         """
-        pass
+        if code not in _supported_locales:
+            raise Exception(f"Unsupported locale: {code}")
+        return _translations[code]
 
     def __init__(self, code: str) -> None:
         self.code = code
@@ -167,7 +229,18 @@ class Locale(object):
         and we return the singular form for the given message when
         ``count == 1``.
         """
-        pass
+        if plural_message is not None:
+            if count is None:
+                raise ValueError("'count' must be provided when translating plural messages")
+            if count != 1:
+                message = plural_message
+                
+        if self.translations:
+            if isinstance(self.translations, gettext.NullTranslations):
+                return self.translations.ngettext(message, plural_message, count) if plural_message else self.translations.gettext(message)
+            else:
+                return self.translations.get(message, {}).get('plural' if count != 1 else 'singular', message)
+        return message
 
     def format_date(self, date: Union[int, float, datetime.datetime], gmt_offset: int=0, relative: bool=True, shorter: bool=False, full_format: bool=False) -> str:
         """Formats the given date.
@@ -185,15 +258,71 @@ class Locale(object):
            Aware `datetime.datetime` objects are now supported (naive
            datetimes are still assumed to be UTC).
         """
-        pass
+        if isinstance(date, (int, float)):
+            date = datetime.datetime.utcfromtimestamp(date)
+        elif isinstance(date, datetime.datetime):
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=datetime.timezone.utc)
+        
+        now = datetime.datetime.now(datetime.timezone.utc)
+        
+        if date > now:
+            if relative and (date - now).total_seconds() < 60:
+                return self.translate("in a moment")
+            return self.format_day(date, gmt_offset, dow=True)
+        
+        local_date = date.astimezone(datetime.timezone(datetime.timedelta(hours=gmt_offset)))
+        local_now = now.astimezone(datetime.timezone(datetime.timedelta(hours=gmt_offset)))
+        
+        delta = now - date
+        seconds = delta.total_seconds()
+        days = delta.days
 
-    def format_day(self, date: datetime.datetime, gmt_offset: int=0, dow: bool=True) -> bool:
+        if not relative and days >= 7:
+            return self.format_day(date, gmt_offset, dow=True)
+        elif relative and seconds < 60:
+            return self.translate("just now")
+        elif relative and seconds < 120:
+            return self.translate("1 minute ago")
+        elif relative and seconds < 3600:
+            minutes = int(seconds / 60)
+            return self.translate(
+                "%(minutes)d minute ago",
+                "%(minutes)d minutes ago",
+                minutes
+            ) % {"minutes": minutes}
+        elif relative and seconds < 7200:
+            return self.translate("1 hour ago")
+        elif relative and seconds < 86400:
+            hours = int(seconds / 3600)
+            return self.translate(
+                "%(hours)d hour ago",
+                "%(hours)d hours ago",
+                hours
+            ) % {"hours": hours}
+        elif days == 0:
+            return self.translate("yesterday")
+        elif days < 7:
+            return self.translate(
+                "%(days)d day ago",
+                "%(days)d days ago",
+                days
+            ) % {"days": days}
+        else:
+            return self.format_day(date, gmt_offset, dow=True)
+
+    def format_day(self, date: datetime.datetime, gmt_offset: int=0, dow: bool=True) -> str:
         """Formats the given date as a day of week.
 
         Example: "Monday, January 22". You can remove the day of week with
         ``dow=False``.
         """
-        pass
+        local_date = date.astimezone(datetime.timezone(datetime.timedelta(hours=gmt_offset)))
+        if dow:
+            weekday = self._weekdays[local_date.weekday()]
+            return f"{weekday}, {self._months[local_date.month - 1]} {local_date.day}"
+        else:
+            return f"{self._months[local_date.month - 1]} {local_date.day}"
 
     def list(self, parts: Any) -> str:
         """Returns a comma-separated list for the given list of parts.
@@ -201,11 +330,26 @@ class Locale(object):
         The format is, e.g., "A, B and C", "A and B" or just "A" for lists
         of size 1.
         """
-        pass
+        if len(parts) == 0:
+            return ""
+        elif len(parts) == 1:
+            return parts[0]
+        elif len(parts) == 2:
+            return self.translate("%(first)s and %(second)s") % {
+                "first": parts[0],
+                "second": parts[1],
+            }
+        else:
+            return self.translate(
+                "%(commas)s and %(last)s"
+            ) % {
+                "commas": ", ".join(parts[:-1]),
+                "last": parts[-1],
+            }
 
     def friendly_number(self, value: int) -> str:
         """Returns a comma-separated number for the given integer."""
-        pass
+        return "{:,}".format(value)
 
 class CSVLocale(Locale):
     """Locale implementation using tornado's CSV translation format."""
@@ -242,4 +386,8 @@ class GettextLocale(Locale):
 
         .. versionadded:: 4.2
         """
-        pass
+        if plural_message is not None:
+            if count is None:
+                raise ValueError("'count' must be provided when translating plural messages")
+            return self.ngettext(f"{context}\x04{message}", f"{context}\x04{plural_message}", count).split('\x04')[-1]
+        return self.gettext(f"{context}\x04{message}").split('\x04')[-1]
