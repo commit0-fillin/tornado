@@ -133,8 +133,43 @@ class HTTPServer(TCPServer, Configurable, httputil.HTTPServerConnectionDelegate)
        The ``io_loop`` argument has been removed.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def __init__(self, request_callback, no_keep_alive=False, xheaders=False,
+                 ssl_options=None, protocol=None, decompress_request=False,
+                 chunk_size=None, max_header_size=None, idle_connection_timeout=None,
+                 body_timeout=None, max_body_size=None, max_buffer_size=None,
+                 trusted_downstream=None):
+        """Initialize the HTTP Server.
+
+        Args:
+            request_callback: An instance of `tornado.web.Application` or other 
+                              `HTTPServerConnectionDelegate`.
+            no_keep_alive (bool): If True, always close the connection after one request.
+            xheaders (bool): If True, support X-Real-Ip/X-Forwarded-For headers.
+            ssl_options: SSL configuration options
+            protocol: Specify the HTTP protocol version to use.
+            decompress_request (bool): If True, decompress request bodies.
+            chunk_size (int): Max size of chunks when reading/writing streams.
+            max_header_size (int): Max size of HTTP headers.
+            idle_connection_timeout (float): Timeout for idle connections.
+            body_timeout (float): Timeout for reading HTTP body.
+            max_body_size (int): Max size of HTTP request body.
+            max_buffer_size (int): Max size of read buffer.
+            trusted_downstream (list): List of trusted downstream hosts.
+        """
+        self.request_callback = request_callback
+        self.no_keep_alive = no_keep_alive
+        self.xheaders = xheaders
+        self.ssl_options = ssl_options
+        self.protocol = protocol
+        self.decompress_request = decompress_request
+        self.chunk_size = chunk_size
+        self.max_header_size = max_header_size
+        self.idle_connection_timeout = idle_connection_timeout
+        self.body_timeout = body_timeout
+        self.max_body_size = max_body_size
+        self.max_buffer_size = max_buffer_size
+        self.trusted_downstream = trusted_downstream
+        self._connections = set()
 
     async def close_all_connections(self) -> None:
         """Close all open connections and asynchronously wait for them to finish.
@@ -148,9 +183,11 @@ class HTTPServer(TCPServer, Configurable, httputil.HTTPServerConnectionDelegate)
         This method does not currently close open websocket connections.
 
         Note that this method is a coroutine and must be called with ``await``.
-
         """
-        pass
+        while self._connections:
+            # Use a list to avoid modification during iteration
+            for conn in list(self._connections):
+                await conn.close()
 
 class _CallableAdapter(httputil.HTTPMessageDelegate):
 
@@ -192,8 +229,28 @@ class _HTTPRequestContext(object):
             return str(self.address)
 
     def _apply_xheaders(self, headers: httputil.HTTPHeaders) -> None:
-        """Rewrite the ``remote_ip`` and ``protocol`` fields."""
-        pass
+        """Rewrite the ``remote_ip`` and ``protocol`` fields based on headers.
+
+        This method is called when ``xheaders`` is set to True.
+
+        Args:
+            headers (httputil.HTTPHeaders): The request headers.
+        """
+        # Check for X-Real-Ip header
+        real_ip = headers.get("X-Real-Ip")
+        if real_ip:
+            self.remote_ip = real_ip
+
+        # Check for X-Forwarded-For header
+        forward_for = headers.get("X-Forwarded-For")
+        if forward_for:
+            # Get the last address in the chain if there are multiple
+            self.remote_ip = forward_for.split(',')[-1].strip()
+
+        # Check for X-Scheme or X-Forwarded-Proto header
+        scheme = headers.get("X-Scheme") or headers.get("X-Forwarded-Proto")
+        if scheme:
+            self.protocol = scheme.lower()
 
     def _unapply_xheaders(self) -> None:
         """Undo changes from `_apply_xheaders`.
@@ -201,7 +258,8 @@ class _HTTPRequestContext(object):
         Xheaders are per-request so they should not leak to the next
         request on the same connection.
         """
-        pass
+        self.remote_ip = self._orig_remote_ip
+        self.protocol = self._orig_protocol
 
 class _ProxyAdapter(httputil.HTTPMessageDelegate):
 
