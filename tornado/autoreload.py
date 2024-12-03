@@ -64,7 +64,17 @@ def start(check_time: int=500) -> None:
     .. versionchanged:: 5.0
        The ``io_loop`` argument (deprecated since version 4.1) has been removed.
     """
-    pass
+    io_loop = ioloop.IOLoop.current()
+    if io_loop in _io_loops:
+        return
+    _io_loops[io_loop] = True
+    if _autoreload_is_main:
+        # If we're the main program, we reload on any changes.
+        io_loop.add_callback(lambda: check_reload(io_loop, check_time))
+    else:
+        # Otherwise, we only check if a module has been modified and therefore
+        # the process should be restarted.
+        io_loop.add_callback(lambda: check_reload(io_loop, check_time, True))
 
 def wait() -> None:
     """Wait for a watched file to change, then restart the process.
@@ -73,14 +83,16 @@ def wait() -> None:
     to run the tests again after any source file changes (but see also
     the command-line interface in `main`)
     """
-    pass
+    io_loop = ioloop.IOLoop()
+    io_loop.add_callback(check_reload, io_loop, 100)
+    io_loop.start()
 
 def watch(filename: str) -> None:
     """Add a file to the watch list.
 
     All imported modules are watched by default.
     """
-    pass
+    _watched_files.add(os.path.abspath(filename))
 
 def add_reload_hook(fn: Callable[[], None]) -> None:
     """Add a function to be called before reloading the process.
@@ -89,7 +101,7 @@ def add_reload_hook(fn: Callable[[], None]) -> None:
     preferable to set the ``FD_CLOEXEC`` flag (using `fcntl` or
     `os.set_inheritable`) instead of using a reload hook to close them.
     """
-    pass
+    _reload_hooks.append(fn)
 _USAGE = '\n  python -m tornado.autoreload -m module.to.run [args...]\n  python -m tornado.autoreload path/to/script.py [args...]\n'
 
 def main() -> None:
@@ -105,6 +117,50 @@ def main() -> None:
     can catch import-time problems like syntax errors that would otherwise
     prevent the script from reaching its call to `wait`.
     """
-    pass
+    global _autoreload_is_main, _original_argv, _original_spec
+    _autoreload_is_main = True
+    _original_argv = sys.argv
+    _original_spec = sys.modules['__main__'].__spec__
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "-m":
+        mode = "module"
+        module = sys.argv[2]
+        del sys.argv[1:3]
+    elif len(sys.argv) >= 2:
+        mode = "script"
+        script = sys.argv[1]
+        sys.argv = sys.argv[1:]
+    else:
+        print("Specify a module or script to run.", file=sys.stderr)
+        print(_USAGE, file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        if mode == "module":
+            import runpy
+            runpy.run_module(module, run_name="__main__", alter_sys=True)
+        elif mode == "script":
+            with open(script) as f:
+                global __file__
+                __file__ = script
+                # Use globals as our "locals" dictionary so that
+                # something that tries to import __main__ (e.g. the unittest
+                # module) will see the right things.
+                exec(compile(f.read(), script, 'exec'), globals(), globals())
+    except SystemExit as e:
+        gen_log.info("Script exited with status %s", e.code)
+    except Exception as e:
+        gen_log.warning("Script exited with uncaught exception", exc_info=True)
+        # If an exception occurred at import time, the file with the error
+        # never made it into sys.modules and so we won't know to watch it.
+        # Just to make sure we've covered everything, watch all files that
+        # were accessed while we tried to load the script.
+        for module in list(sys.modules.values()):
+            if hasattr(module, '__file__'):
+                watch(module.__file__)
+    else:
+        gen_log.info("Script exited normally")
+    # Keep the event loop running so we can detect changes
+    wait()
 if __name__ == '__main__':
     main()
