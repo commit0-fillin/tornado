@@ -267,3 +267,24 @@ class _ProxyAdapter(httputil.HTTPMessageDelegate):
         self.connection = request_conn
         self.delegate = delegate
 HTTPRequest = httputil.HTTPServerRequest
+def main():
+    """
+    Main entry point for the HTTP server.
+    This function sets up and starts the server.
+    """
+    import asyncio
+    from tornado.web import Application
+    from tornado.ioloop import IOLoop
+
+    def make_app():
+        return Application([
+            # Add your handlers here
+        ])
+
+    app = make_app()
+    app.listen(8888)
+    print("Server is running on http://localhost:8888")
+    IOLoop.current().start()
+
+if __name__ == "__main__":
+    main()
