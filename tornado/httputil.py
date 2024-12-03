@@ -35,7 +35,7 @@ def _normalize_header(name: str) -> str:
     >>> _normalize_header("coNtent-TYPE")
     'Content-Type'
     """
-    pass
+    return "-".join(word.capitalize() for word in name.split("-"))
 
 class HTTPHeaders(collections.abc.MutableMapping):
     """A dictionary that maintains ``Http-Header-Case`` for all keys.
@@ -89,16 +89,31 @@ class HTTPHeaders(collections.abc.MutableMapping):
         if len(args) == 1 and len(kwargs) == 0 and isinstance(args[0], HTTPHeaders):
             for k, v in args[0].get_all():
                 self.add(k, v)
+        elif len(args) == 1 and len(kwargs) == 0 and isinstance(args[0], dict):
+            for k, v in args[0].items():
+                self.add(k, v)
+        elif len(args) == 1 and len(kwargs) == 0 and isinstance(args[0], (list, tuple)):
+            for k, v in args[0]:
+                self.add(k, v)
         else:
-            self.update(*args, **kwargs)
+            for k, v in dict(*args, **kwargs).items():
+                self.add(k, v)
 
     def add(self, name: str, value: str) -> None:
         """Adds a new value for the given key."""
-        pass
+        norm_name = _normalize_header(name)
+        self._last_key = norm_name
+        if norm_name in self._dict:
+            self._dict[norm_name] = f"{self._dict[norm_name]},{value}"
+            self._as_list[norm_name].append(value)
+        else:
+            self._dict[norm_name] = value
+            self._as_list[norm_name] = [value]
 
     def get_list(self, name: str) -> List[str]:
         """Returns all values for the given header as a list."""
-        pass
+        norm_name = _normalize_header(name)
+        return self._as_list.get(norm_name, [])
 
     def get_all(self) -> Iterable[Tuple[str, str]]:
         """Returns an iterable of all (name, value) pairs.
@@ -106,7 +121,9 @@ class HTTPHeaders(collections.abc.MutableMapping):
         If a header has multiple values, multiple pairs will be
         returned with the same name.
         """
-        pass
+        for name, values in self._as_list.items():
+            for value in values:
+                yield (name, value)
 
     def parse_line(self, line: str) -> None:
         """Updates the dictionary with a single header line.
@@ -116,7 +133,8 @@ class HTTPHeaders(collections.abc.MutableMapping):
         >>> h.get('content-type')
         'text/html'
         """
-        pass
+        name, value = line.split(":", 1)
+        self.add(name, value.strip())
 
     @classmethod
     def parse(cls, headers: str) -> 'HTTPHeaders':
@@ -132,7 +150,14 @@ class HTTPHeaders(collections.abc.MutableMapping):
            mix of `KeyError`, and `ValueError`.
 
         """
-        pass
+        h = cls()
+        for line in headers.splitlines():
+            if line:
+                try:
+                    h.parse_line(line)
+                except ValueError:
+                    raise HTTPInputError("Malformed header line: %s" % line)
+        return h
 
     def __setitem__(self, name: str, value: str) -> None:
         norm_name = _normalize_header(name)
@@ -157,7 +182,7 @@ class HTTPHeaders(collections.abc.MutableMapping):
     def __str__(self) -> str:
         lines = []
         for name, value in self.get_all():
-            lines.append('%s: %s\n' % (name, value))
+            lines.append(f'{name}: {value}\n')
         return ''.join(lines)
     __unicode__ = __str__
 
@@ -284,15 +309,24 @@ class HTTPServerRequest(object):
     @property
     def cookies(self) -> Dict[str, http.cookies.Morsel]:
         """A dictionary of ``http.cookies.Morsel`` objects."""
-        pass
+        cookie_header = self.get("Cookie")
+        if not cookie_header:
+            return {}
+        
+        cookie = http.cookies.SimpleCookie()
+        cookie.load(cookie_header)
+        return {k: v for k, v in cookie.items()}
 
     def full_url(self) -> str:
         """Reconstructs the full URL for this request."""
-        pass
+        return f"{self.protocol}://{self.host}{self.uri}"
 
     def request_time(self) -> float:
         """Returns the amount of time it took for this request to execute."""
-        pass
+        if self._finish_time is None:
+            return time.time() - self._start_time
+        else:
+            return self._finish_time - self._start_time
 
     def get_ssl_certificate(self, binary_form: bool=False) -> Union[None, Dict, bytes]:
         """Returns the client's SSL certificate, if any.
@@ -313,12 +347,15 @@ class HTTPServerRequest(object):
         details.
         http://docs.python.org/library/ssl.html#sslsocket-objects
         """
-        pass
+        try:
+            return self.connection.get_ssl_certificate(binary_form=binary_form)
+        except AttributeError:
+            return None
 
     def __repr__(self) -> str:
         attrs = ('protocol', 'host', 'method', 'uri', 'version', 'remote_ip')
-        args = ', '.join(['%s=%r' % (n, getattr(self, n)) for n in attrs])
-        return '%s(%s)' % (self.__class__.__name__, args)
+        args = ', '.join([f'{n}={getattr(self, n)!r}' for n in attrs])
+        return f'{self.__class__.__name__}({args})'
 
 class HTTPInputError(Exception):
     """Exception class for malformed HTTP requests or responses
