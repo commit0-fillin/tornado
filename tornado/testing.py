@@ -50,7 +50,19 @@ def bind_unused_port(reuse_port: bool=False, address: str='127.0.0.1') -> Tuple[
        Added optional ``address`` argument to
        override the default "127.0.0.1".
     """
-    pass
+    sock = socket.socket()
+    if reuse_port:
+        if not hasattr(socket, "SO_REUSEPORT"):
+            raise ValueError("reuse_port not supported on this platform")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    
+    # Bind to a free port. By using 0 as the port number, 
+    # the system will allocate an unused port for us.
+    sock.bind((address, 0))
+    
+    # Get the actual port number that was allocated
+    port = sock.getsockname()[1]
+    return sock, port
 
 def get_async_test_timeout() -> float:
     """Get the global timeout setting for async tests.
@@ -59,7 +71,10 @@ def get_async_test_timeout() -> float:
 
     .. versionadded:: 3.1
     """
-    pass
+    try:
+        return float(os.environ.get('ASYNC_TEST_TIMEOUT', 5))
+    except ValueError:
+        return 5.0
 
 class AsyncTestCase(unittest.TestCase):
     """`~unittest.TestCase` subclass for testing `.IOLoop`-based
@@ -117,6 +132,7 @@ class AsyncTestCase(unittest.TestCase):
         self.__stop_args = None
         self.__timeout = None
         self._test_generator = None
+        self.io_loop = None
 
     def get_new_ioloop(self) -> IOLoop:
         """Returns the `.IOLoop` to use for this test.
@@ -132,7 +148,8 @@ class AsyncTestCase(unittest.TestCase):
         .. deprecated:: 6.3
            This method will be removed in Tornado 7.0.
         """
-        pass
+        warnings.warn("get_new_ioloop is deprecated, use asyncio directly", DeprecationWarning)
+        return IOLoop()
 
     def _callTestMethod(self, method: Callable) -> None:
         """Run the given test method, raising an error if it returns non-None.
@@ -147,7 +164,11 @@ class AsyncTestCase(unittest.TestCase):
         present in all supported versions of Python (3.8+), and if it goes away in the future that's
         OK because we can just remove this override as noted above.
         """
-        pass
+        result = method()
+        if result is not None:
+            warnings.warn(f"Test method {method.__name__} should return None, not {result!r}",
+                          DeprecationWarning, stacklevel=2)
+        super()._callTestMethod(method)
 
     def stop(self, _arg: Any=None, **kwargs: Any) -> None:
         """Stops the `.IOLoop`, causing one pending (or future) call to `wait()`
@@ -160,7 +181,12 @@ class AsyncTestCase(unittest.TestCase):
 
            `stop` and `wait` are deprecated; use ``@gen_test`` instead.
         """
-        pass
+        warnings.warn("stop is deprecated, use @gen_test instead", DeprecationWarning)
+        self.__stop_args = kwargs or _arg
+        if self.__running:
+            self.io_loop.stop()
+            self.__running = False
+        self.__stopped = True
 
     def wait(self, condition: Optional[Callable[..., bool]]=None, timeout: Optional[float]=None) -> Any:
         """Runs the `.IOLoop` until stop is called or timeout has passed.
@@ -180,7 +206,32 @@ class AsyncTestCase(unittest.TestCase):
 
            `stop` and `wait` are deprecated; use ``@gen_test`` instead.
         """
-        pass
+        warnings.warn("wait is deprecated, use @gen_test instead", DeprecationWarning)
+        if timeout is None:
+            timeout = get_async_test_timeout()
+
+        if not self.__stopped:
+            if timeout:
+                def timeout_func():
+                    try:
+                        raise TimeoutError('Async operation timed out after %s seconds' % timeout)
+                    except Exception:
+                        self.__failure = sys.exc_info()
+                    self.stop()
+                self.io_loop.add_timeout(self.io_loop.time() + timeout, timeout_func)
+            while True:
+                self.__running = True
+                self.io_loop.start()
+                if (self.__failure is not None or
+                    condition is None or condition()):
+                    break
+        assert self.__stopped
+        self.__stopped = False
+        if self.__failure is not None:
+            raise_exc_info(self.__failure)
+        result = self.__stop_args
+        self.__stop_args = None
+        return result
 
 class AsyncHTTPTestCase(AsyncTestCase):
     """A test case that starts up an HTTP server.
