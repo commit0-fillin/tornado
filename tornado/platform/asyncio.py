@@ -96,7 +96,7 @@ def to_tornado_future(asyncio_future: asyncio.Future) -> asyncio.Future:
        Tornado ``Futures`` have been merged with `asyncio.Future`,
        so this method is now a no-op.
     """
-    pass
+    return asyncio_future
 
 def to_asyncio_future(tornado_future: asyncio.Future) -> asyncio.Future:
     """Convert a Tornado yieldable object to an `asyncio.Future`.
@@ -111,7 +111,7 @@ def to_asyncio_future(tornado_future: asyncio.Future) -> asyncio.Future:
        Tornado ``Futures`` have been merged with `asyncio.Future`,
        so this method is now equivalent to `tornado.gen.convert_yielded`.
     """
-    pass
+    return convert_yielded(tornado_future)
 if sys.platform == 'win32' and hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
     _BasePolicy = asyncio.WindowsSelectorEventLoopPolicy
 else:
