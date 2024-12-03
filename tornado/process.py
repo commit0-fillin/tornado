@@ -21,7 +21,10 @@ CalledProcessError = subprocess.CalledProcessError
 
 def cpu_count() -> int:
     """Returns the number of processors on this machine."""
-    pass
+    try:
+        return multiprocessing.cpu_count()
+    except NotImplementedError:
+        return 1
 _task_id = None
 
 def fork_processes(num_processes: Optional[int], max_restarts: Optional[int]=None) -> int:
@@ -52,14 +55,68 @@ def fork_processes(num_processes: Optional[int], max_restarts: Optional[int]=Non
 
     Availability: Unix
     """
-    pass
+    global _task_id
+    if max_restarts is None:
+        max_restarts = 100
+
+    if num_processes is None or num_processes <= 0:
+        num_processes = cpu_count()
+
+    if ioloop.IOLoop.initialized():
+        raise RuntimeError("Cannot run in multiple processes: IOLoop instance "
+                           "has already been initialized. You cannot call "
+                           "IOLoop.instance() before calling start_processes()")
+
+    def start_child(i: int) -> None:
+        _task_id = i
+        ioloop.IOLoop.instance().add_callback(ioloop.IOLoop.instance().stop)
+
+    for i in range(num_processes):
+        pid = os.fork()
+        if pid == 0:
+            start_child(i)
+            return i
+        else:
+            gen_log.info("Starting child process %d", pid)
+
+    num_restarts = 0
+    while True:
+        try:
+            pid, status = os.wait()
+        except OSError as e:
+            if e.errno == errno.EINTR:
+                continue
+            raise
+        if pid == 0:
+            break
+        exit_code = os.WEXITSTATUS(status)
+        if os.WIFSIGNALED(status):
+            gen_log.warning("Child %d (pid %d) killed by signal %d, restarting",
+                            _task_id, pid, os.WTERMSIG(status))
+        elif exit_code != 0:
+            gen_log.warning("Child %d (pid %d) exited with status %d, restarting",
+                            _task_id, pid, exit_code)
+        else:
+            gen_log.info("Child %d (pid %d) exited normally", _task_id, pid)
+            continue
+        num_restarts += 1
+        if num_restarts > max_restarts:
+            raise RuntimeError("Too many child restarts, giving up")
+        new_id = os.fork()
+        if new_id == 0:
+            return _task_id
+        else:
+            gen_log.info("Starting child process %d", new_id)
+
+    sys.exit(0)
 
 def task_id() -> Optional[int]:
     """Returns the current task id, if any.
 
     Returns None if this process was not created by `fork_processes`.
     """
-    pass
+    global _task_id
+    return _task_id
 
 class Subprocess(object):
     """Wraps ``subprocess.Popen`` with IOStream support.
@@ -177,9 +234,15 @@ class Subprocess(object):
 
         Availability: Unix
         """
-        pass
+        if cls._initialized:
+            return
+        cls._initialized = True
+        signal.signal(signal.SIGCHLD, cls._handle_sigchld)
 
     @classmethod
     def uninitialize(cls) -> None:
         """Removes the ``SIGCHLD`` handler."""
-        pass
+        if not cls._initialized:
+            return
+        cls._initialized = False
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
