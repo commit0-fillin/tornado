@@ -571,4 +571,5 @@ class _RequestProxy(object):
         else:
             return None
 if __name__ == '__main__':
+    AsyncHTTPClient.configure("tornado.simple_httpclient.SimpleAsyncHTTPClient")
     main()
