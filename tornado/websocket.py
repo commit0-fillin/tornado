@@ -163,7 +163,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
         Set websocket_ping_interval = 0 to disable pings.
         """
-        pass
+        return self.application.settings.get('websocket_ping_interval', None)
 
     @property
     def ping_timeout(self) -> Optional[float]:
@@ -171,7 +171,8 @@ class WebSocketHandler(tornado.web.RequestHandler):
         close the websocket connection (VPNs, etc. can fail to cleanly close ws connections).
         Default is max of 3 pings or 30 seconds.
         """
-        pass
+        return self.application.settings.get('websocket_ping_timeout', 
+                                             max(3 * (self.ping_interval or 0), 30))
 
     @property
     def max_message_size(self) -> int:
@@ -182,7 +183,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
         Default is 10MiB.
         """
-        pass
+        return self.application.settings.get('websocket_max_message_size', 10 * 1024 * 1024)
 
     def write_message(self, message: Union[bytes, str, Dict[str, Any]], binary: bool=False) -> 'Future[None]':
         """Sends the given message to the client of this Web Socket.
@@ -206,7 +207,13 @@ class WebSocketHandler(tornado.web.RequestHandler):
            Consistently raises `WebSocketClosedError`. Previously could
            sometimes raise `.StreamClosedError`.
         """
-        pass
+        if self.ws_connection is None:
+            raise WebSocketClosedError()
+        if isinstance(message, dict):
+            message = json.dumps(message)
+        if isinstance(message, str):
+            message = message.encode('utf-8')
+        return self.ws_connection.write_message(message, binary=binary)
 
     def select_subprotocol(self, subprotocols: List[str]) -> Optional[str]:
         """Override to implement subprotocol negotiation.
@@ -231,7 +238,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
            an empty string instead of an empty list if no subprotocols
            were proposed by the client.
         """
-        pass
+        return None
 
     @property
     def selected_subprotocol(self) -> Optional[str]:
@@ -239,7 +246,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
         .. versionadded:: 5.1
         """
-        pass
+        return self.ws_connection.selected_subprotocol if self.ws_connection else None
 
     def get_compression_options(self) -> Optional[Dict[str, Any]]:
         """Override to return compression options for the connection.
@@ -262,7 +269,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
            Added ``compression_level`` and ``mem_level``.
         """
-        pass
+        return None
 
     def open(self, *args: str, **kwargs: str) -> Optional[Awaitable[None]]:
         """Invoked when a new WebSocket is opened.
@@ -289,7 +296,7 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
            ``on_message`` can be a coroutine.
         """
-        pass
+        raise NotImplementedError("on_message must be overridden")
 
     def ping(self, data: Union[str, bytes]=b'') -> None:
         """Send ping frame to the remote end.
@@ -307,7 +314,9 @@ class WebSocketHandler(tornado.web.RequestHandler):
            The data argument is now optional.
 
         """
-        pass
+        if self.ws_connection is None:
+            raise WebSocketClosedError()
+        self.ws_connection.write_ping(data)
 
     def on_pong(self, data: bytes) -> None:
         """Invoked when the response to a ping frame is received."""
@@ -346,7 +355,9 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
            Added the ``code`` and ``reason`` arguments.
         """
-        pass
+        if self.ws_connection:
+            self.ws_connection.close(code, reason)
+            self.ws_connection = None
 
     def check_origin(self, origin: str) -> bool:
         """Override to enable support for allowing alternate origins.
@@ -395,7 +406,12 @@ class WebSocketHandler(tornado.web.RequestHandler):
         .. versionadded:: 4.0
 
         """
-        pass
+        parsed_origin = urllib.parse.urlparse(origin)
+        origin = parsed_origin.netloc
+        parsed_host = urllib.parse.urlparse(self.request.full_url())
+        host = parsed_host.netloc
+        
+        return origin == host
 
     def set_nodelay(self, value: bool) -> None:
         """Set the no-delay flag for this stream.
@@ -411,7 +427,8 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
         .. versionadded:: 3.1
         """
-        pass
+        if self.ws_connection is not None:
+            self.ws_connection.set_nodelay(value)
 
 class WebSocketProtocol(abc.ABC):
     """Base class for WebSocket protocol versions."""
