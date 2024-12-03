@@ -197,7 +197,8 @@ class Subprocess(object):
 
         Availability: Unix
         """
-        pass
+        Subprocess.initialize()
+        self._exit_callback = callback
 
     def wait_for_exit(self, raise_error: bool=True) -> 'Future[int]':
         """Returns a `.Future` which resolves when the process exits.
@@ -217,7 +218,14 @@ class Subprocess(object):
 
         Availability: Unix
         """
-        pass
+        future = Future()
+        def callback(exit_status):
+            if raise_error and exit_status != 0:
+                future.set_exception(subprocess.CalledProcessError(exit_status, self.proc.args))
+            else:
+                future.set_result(exit_status)
+        self.set_exit_callback(callback)
+        return future
 
     @classmethod
     def initialize(cls) -> None:
