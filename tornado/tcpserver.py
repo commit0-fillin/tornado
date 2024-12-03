@@ -174,7 +174,13 @@ class TCPServer(object):
            Use either ``listen()`` or ``add_sockets()`` instead of ``bind()``
            and ``start()``.
         """
-        pass
+        sockets = bind_sockets(port, address=address, family=family,
+                               backlog=backlog, flags=flags,
+                               reuse_port=reuse_port)
+        if self._started:
+            self.add_sockets(sockets)
+        else:
+            self._pending_sockets.extend(sockets)
 
     def start(self, num_processes: Optional[int] = 1) -> None:
         """
