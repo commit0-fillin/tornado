@@ -95,15 +95,33 @@ class Condition(_TimeoutGarbageCollector):
         Returns a `.Future` that resolves ``True`` if the condition is notified,
         or ``False`` after a timeout.
         """
-        pass
+        future = Future()
+        self._waiters.append(future)
+        
+        if timeout:
+            if isinstance(timeout, datetime.timedelta):
+                timeout = timeout.total_seconds()
+            
+            def on_timeout():
+                self._waiters.remove(future)
+                if not future.done():
+                    future.set_result(False)
+            
+            IOLoop.current().call_later(timeout, on_timeout)
+        
+        return future
 
     def notify(self, n: int=1) -> None:
         """Wake ``n`` waiters."""
-        pass
+        waiters = self._waiters[:n]
+        self._waiters = self._waiters[n:]
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(True)
 
     def notify_all(self) -> None:
         """Wake all waiters."""
-        pass
+        self.notify(len(self._waiters))
 
 class Event(object):
     """An event blocks coroutines until its internal flag is set to True.
@@ -154,21 +172,26 @@ class Event(object):
 
     def is_set(self) -> bool:
         """Return ``True`` if the internal flag is true."""
-        pass
+        return self._value
 
     def set(self) -> None:
         """Set the internal flag to ``True``. All waiters are awakened.
 
         Calling `.wait` once the flag is set will not block.
         """
-        pass
+        if not self._value:
+            self._value = True
+            for waiter in self._waiters:
+                if not waiter.done():
+                    waiter.set_result(None)
+            self._waiters.clear()
 
     def clear(self) -> None:
         """Reset the internal flag to ``False``.
 
         Calls to `.wait` will block until `.set` is called.
         """
-        pass
+        self._value = False
 
     def wait(self, timeout: Optional[Union[float, datetime.timedelta]]=None) -> Awaitable[None]:
         """Block until the internal flag is true.
@@ -176,7 +199,26 @@ class Event(object):
         Returns an awaitable, which raises `tornado.util.TimeoutError` after a
         timeout.
         """
-        pass
+        if self._value:
+            future = Future()
+            future.set_result(None)
+            return future
+
+        waiter = Future()
+        self._waiters.add(waiter)
+
+        if timeout:
+            if isinstance(timeout, datetime.timedelta):
+                timeout = timeout.total_seconds()
+            
+            def on_timeout():
+                self._waiters.discard(waiter)
+                if not waiter.done():
+                    waiter.set_exception(TimeoutError())
+            
+            IOLoop.current().call_later(timeout, on_timeout)
+
+        return waiter
 
 class _ReleasingContextManager(object):
     """Releases a Lock or Semaphore at the end of a "with" statement.
@@ -191,7 +233,7 @@ class _ReleasingContextManager(object):
         self._obj = obj
 
     def __enter__(self) -> None:
-        pass
+        return None
 
     def __exit__(self, exc_type: 'Optional[Type[BaseException]]', exc_val: Optional[BaseException], exc_tb: Optional[types.TracebackType]) -> None:
         self._obj.release()
@@ -222,7 +264,8 @@ class Semaphore(_TimeoutGarbageCollector):
                # simulate the asynchronous passage of time
                await gen.sleep(0)
                await gen.sleep(0)
-               f.set_result(None)
+               if not f.done():
+                   f.set_result(None)
 
        def use_some_resource():
            global inited
@@ -312,7 +355,13 @@ class Semaphore(_TimeoutGarbageCollector):
 
     def release(self) -> None:
         """Increment the counter and wake one waiter."""
-        pass
+        self._value += 1
+        while self._waiters and self._value > 0:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                self._value -= 1
+                waiter.set_result(_ReleasingContextManager(self))
+                break
 
     def acquire(self, timeout: Optional[Union[float, datetime.timedelta]]=None) -> Awaitable[_ReleasingContextManager]:
         """Decrement the counter. Returns an awaitable.
@@ -320,7 +369,28 @@ class Semaphore(_TimeoutGarbageCollector):
         Block if the counter is zero and wait for a `.release`. The awaitable
         raises `.TimeoutError` after the deadline.
         """
-        pass
+        if self._value > 0:
+            self._value -= 1
+            future = Future()
+            future.set_result(_ReleasingContextManager(self))
+            return future
+
+        waiter = Future()
+        self._waiters.append(waiter)
+
+        if timeout:
+            if isinstance(timeout, datetime.timedelta):
+                timeout = timeout.total_seconds()
+            
+            def on_timeout():
+                if waiter in self._waiters:
+                    self._waiters.remove(waiter)
+                    if not waiter.done():
+                        waiter.set_exception(TimeoutError())
+            
+            IOLoop.current().call_later(timeout, on_timeout)
+
+        return waiter
 
     def __enter__(self) -> None:
         raise RuntimeError("Use 'async with' instead of 'with' for Semaphore")
@@ -349,7 +419,9 @@ class BoundedSemaphore(Semaphore):
 
     def release(self) -> None:
         """Increment the counter and wake one waiter."""
-        pass
+        if self._value >= self._initial_value:
+            raise ValueError("Semaphore released too many times")
+        super().release()
 
 class Lock(object):
     """A lock for coroutines.
@@ -400,7 +472,7 @@ class Lock(object):
         Returns an awaitable, which raises `tornado.util.TimeoutError` after a
         timeout.
         """
-        pass
+        return self._block.acquire(timeout)
 
     def release(self) -> None:
         """Unlock.
@@ -409,7 +481,10 @@ class Lock(object):
 
         If not locked, raise a `RuntimeError`.
         """
-        pass
+        try:
+            self._block.release()
+        except ValueError:
+            raise RuntimeError("release unlocked lock")
 
     def __enter__(self) -> None:
         raise RuntimeError('Use `async with` instead of `with` for Lock')
