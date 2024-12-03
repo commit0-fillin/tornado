@@ -74,6 +74,7 @@ class _StreamBuffer(object):
         self._buffers = collections.deque()
         self._first_pos = 0
         self._size = 0
+        self._large_buf_threshold = 2048
 
     def __len__(self) -> int:
         return self._size
@@ -83,20 +84,55 @@ class _StreamBuffer(object):
         """
         Append the given piece of data (should be a buffer-compatible object).
         """
-        pass
+        if len(data) > self._large_buf_threshold:
+            self._buffers.append(memoryview(data))
+        else:
+            self._buffers.append(bytes(data))
+        self._size += len(data)
 
     def peek(self, size: int) -> memoryview:
         """
         Get a view over at most ``size`` bytes (possibly fewer) at the
         current buffer position.
         """
-        pass
+        if not self._buffers:
+            return memoryview(b"")
+        
+        first_buffer = self._buffers[0]
+        if len(first_buffer) - self._first_pos >= size:
+            return memoryview(first_buffer)[self._first_pos:self._first_pos + size]
+        
+        view = bytearray(size)
+        pos = 0
+        for buf in self._buffers:
+            if pos == size:
+                break
+            if pos == 0:
+                chunk = buf[self._first_pos:]
+            else:
+                chunk = buf
+            if len(chunk) > size - pos:
+                chunk = chunk[:size - pos]
+            view[pos:pos + len(chunk)] = chunk
+            pos += len(chunk)
+        
+        return memoryview(view[:pos])
 
     def advance(self, size: int) -> None:
         """
         Advance the current buffer position by ``size`` bytes.
         """
-        pass
+        self._size -= size
+        while size > 0 and self._buffers:
+            buffer = self._buffers[0]
+            buffer_len = len(buffer)
+            if buffer_len - self._first_pos <= size:
+                size -= buffer_len - self._first_pos
+                self._first_pos = 0
+                self._buffers.popleft()
+            else:
+                self._first_pos += size
+                size = 0
 
 class BaseIOStream(object):
     """A utility class to write to and read from a non-blocking file or socket.
@@ -162,7 +198,7 @@ class BaseIOStream(object):
 
     def fileno(self) -> Union[int, ioloop._Selectable]:
         """Returns the file descriptor for this stream."""
-        pass
+        return self.socket.fileno()
 
     def close_fd(self) -> None:
         """Closes the file underlying this stream.
@@ -170,7 +206,10 @@ class BaseIOStream(object):
         ``close_fd`` is called by `BaseIOStream` and should not be called
         elsewhere; other users should call `close` instead.
         """
-        pass
+        try:
+            self.socket.close()
+        except Exception:
+            gen_log.error("error closing socket", exc_info=True)
 
     def write_to_fd(self, data: memoryview) -> int:
         """Attempts to write ``data`` to the underlying file.
