@@ -97,6 +97,7 @@ class HTTP1Connection(httputil.HTTPConnection):
         self._chunking_output = False
         self._expected_content_remaining = None
         self._pending_write = None
+        self._timeout = None
 
     def read_response(self, delegate: httputil.HTTPMessageDelegate) -> Awaitable[bool]:
         """Read a single HTTP response.
@@ -109,7 +110,23 @@ class HTTP1Connection(httputil.HTTPConnection):
         Returns a `.Future` that resolves to a bool after the full response has
         been read. The result is true if the stream is still open.
         """
-        pass
+        future = Future()
+        
+        def handle_response(response_future):
+            try:
+                response = response_future.result()
+                delegate.headers_received(response.start_line, response.headers)
+                if response.body:
+                    delegate.data_received(response.body)
+                delegate.finish()
+                future.set_result(not self._read_finished)
+            except Exception as e:
+                future.set_exception(e)
+        
+        self.stream.read_until(b"\r\n\r\n", self._on_headers)
+        self._read_future = future
+        future.add_done_callback(handle_response)
+        return future
 
     def _clear_callbacks(self) -> None:
         """Clears the callback attributes.
@@ -117,7 +134,10 @@ class HTTP1Connection(httputil.HTTPConnection):
         This allows the request handler to be garbage collected more
         quickly in CPython by breaking up reference cycles.
         """
-        pass
+        self._write_callback = None
+        self._read_callback = None
+        self._close_callback = None
+        self._finish_callback = None
 
     def set_close_callback(self, callback: Optional[Callable[[], None]]) -> None:
         """Sets a callback that will be run when the connection is closed.
@@ -131,7 +151,7 @@ class HTTP1Connection(httputil.HTTPConnection):
         after sending its request but before receiving all the
         response.
         """
-        pass
+        self._close_callback = callback
 
     def detach(self) -> iostream.IOStream:
         """Take control of the underlying stream.
@@ -141,25 +161,38 @@ class HTTP1Connection(httputil.HTTPConnection):
         `.HTTPMessageDelegate.headers_received`.  Intended for implementing
         protocols like websockets that tunnel over an HTTP handshake.
         """
-        pass
+        self._clear_callbacks()
+        stream = self.stream
+        self.stream = None
+        return stream
 
     def set_body_timeout(self, timeout: float) -> None:
         """Sets the body timeout for a single request.
 
         Overrides the value from `.HTTP1ConnectionParameters`.
         """
-        pass
+        self._body_timeout = timeout
 
     def set_max_body_size(self, max_body_size: int) -> None:
         """Sets the body size limit for a single request.
 
         Overrides the value from `.HTTP1ConnectionParameters`.
         """
-        pass
+        self._max_body_size = max_body_size
 
     def write_headers(self, start_line: Union[httputil.RequestStartLine, httputil.ResponseStartLine], headers: httputil.HTTPHeaders, chunk: Optional[bytes]=None) -> 'Future[None]':
         """Implements `.HTTPConnection.write_headers`."""
-        pass
+        future = Future()
+        lines = [start_line.encode()]
+        for k, v in headers.get_all():
+            lines.append(f"{k}: {v}".encode('latin1'))
+        lines.append(b'\r\n')
+        if chunk:
+            lines.append(chunk)
+        data = b'\r\n'.join(lines)
+        self._pending_write = self.stream.write(data)
+        self._pending_write.add_done_callback(lambda f: future.set_result(None))
+        return future
 
     def write(self, chunk: bytes) -> 'Future[None]':
         """Implements `.HTTPConnection.write`.
@@ -168,11 +201,21 @@ class HTTP1Connection(httputil.HTTPConnection):
         skip `write_headers` and instead call `write()` with a
         pre-encoded header block.
         """
-        pass
+        future = Future()
+        if self._chunking_output:
+            chunk = ("%x\r\n" % len(chunk)).encode('ascii') + chunk + b"\r\n"
+        self._pending_write = self.stream.write(chunk)
+        self._pending_write.add_done_callback(lambda f: future.set_result(None))
+        return future
 
     def finish(self) -> None:
         """Implements `.HTTPConnection.finish`."""
-        pass
+        if self._chunking_output:
+            chunk = b"0\r\n\r\n"
+            future = self.stream.write(chunk)
+            future.add_done_callback(self._finish_request)
+        else:
+            self._finish_request()
 
 class _GzipMessageDelegate(httputil.HTTPMessageDelegate):
     """Wraps an `HTTPMessageDelegate` to decode ``Content-Encoding: gzip``."""
@@ -229,3 +272,5 @@ def is_transfer_encoding_chunked(headers: httputil.HTTPHeaders) -> bool:
     Raise httputil.HTTPInputError if any other transfer encoding is used.
     """
     pass
+    def __enter__(self):
+        return self
