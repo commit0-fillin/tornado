@@ -106,5 +106,76 @@ class WSGIContainer(object):
         .. versionchanged:: 6.3
            No longer a static method.
         """
-        pass
+        hostport = request.host.split(":")
+        if len(hostport) == 2:
+            host = hostport[0]
+            port = int(hostport[1])
+        else:
+            host = request.host
+            port = 443 if request.protocol == "https" else 80
+        environ = {
+            "REQUEST_METHOD": request.method,
+            "SCRIPT_NAME": "",
+            "PATH_INFO": request.path,
+            "QUERY_STRING": request.query,
+            "REMOTE_ADDR": request.remote_ip,
+            "SERVER_NAME": host,
+            "SERVER_PORT": str(port),
+            "SERVER_PROTOCOL": request.version,
+            "wsgi.version": (1, 0),
+            "wsgi.url_scheme": request.protocol,
+            "wsgi.input": BytesIO(request.body),
+            "wsgi.errors": sys.stderr,
+            "wsgi.multithread": False,
+            "wsgi.multiprocess": True,
+            "wsgi.run_once": False,
+        }
+
+        if "Content-Type" in request.headers:
+            environ["CONTENT_TYPE"] = request.headers.pop("Content-Type")
+        if "Content-Length" in request.headers:
+            environ["CONTENT_LENGTH"] = request.headers.pop("Content-Length")
+        for key, value in request.headers.items():
+            environ["HTTP_" + key.replace("-", "_").upper()] = value
+
+        return environ
+
+    @staticmethod
+    def main():
+        """Example usage for a simple TCP server."""
+        import asyncio
+        import errno
+        import functools
+        import socket
+
+        from tornado.iostream import IOStream
+
+        async def handle_connection(connection, address):
+            stream = IOStream(connection)
+            message = await stream.read_until_close()
+            print("message from client:", message.decode().strip())
+
+        def connection_ready(sock, fd, events):
+            while True:
+                try:
+                    connection, address = sock.accept()
+                except BlockingIOError:
+                    return
+                connection.setblocking(0)
+                io_loop = IOLoop.current()
+                io_loop.spawn_callback(handle_connection, connection, address)
+
+        async def run_server():
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setblocking(0)
+            sock.bind(("", 8888))
+            sock.listen(128)
+
+            io_loop = IOLoop.current()
+            callback = functools.partial(connection_ready, sock)
+            io_loop.add_handler(sock.fileno(), callback, io_loop.READ)
+            await asyncio.Event().wait()
+
+        asyncio.run(run_server())
 HTTPRequest = httputil.HTTPServerRequest
