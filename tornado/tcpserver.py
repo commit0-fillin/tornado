@@ -113,38 +113,35 @@ class TCPServer(object):
             if 'keyfile' in self.ssl_options and (not os.path.exists(self.ssl_options['keyfile'])):
                 raise ValueError('keyfile "%s" does not exist' % self.ssl_options['keyfile'])
 
-    def listen(self, port: int, address: Optional[str]=None, family: socket.AddressFamily=socket.AF_UNSPEC, backlog: int=_DEFAULT_BACKLOG, flags: Optional[int]=None, reuse_port: bool=False) -> None:
-        """Starts accepting connections on the given port.
+    def listen(self, port: int, address: Optional[str] = None) -> None:
+        """
+        Start accepting connections on the given port.
 
         This method may be called more than once to listen on multiple ports.
-        `listen` takes effect immediately; it is not necessary to call
-        `TCPServer.start` afterwards.  It is, however, necessary to start the
-        event loop if it is not already running.
-
-        All arguments have the same meaning as in
-        `tornado.netutil.bind_sockets`.
-
-        .. versionchanged:: 6.2
-
-           Added ``family``, ``backlog``, ``flags``, and ``reuse_port``
-           arguments to match `tornado.netutil.bind_sockets`.
+        `listen()` takes effect immediately; it is not necessary to call
+        `TCPServer.start` afterwards.  It is, however, necessary to start
+        the `.IOLoop`.
         """
-        pass
+        sockets = bind_sockets(port, address)
+        self.add_sockets(sockets)
 
-    def add_sockets(self, sockets: Iterable[socket.socket]) -> None:
-        """Makes this server start accepting connections on the given sockets.
+    def add_sockets(self, sockets: List[socket.socket]) -> None:
+        """
+        Makes this server start accepting connections on the given sockets.
 
         The ``sockets`` parameter is a list of socket objects such as
         those returned by `~tornado.netutil.bind_sockets`.
-        `add_sockets` is typically used in combination with that
-        method and `tornado.process.fork_processes` to provide greater
-        control over the initialization of a multi-process server.
         """
-        pass
+        for sock in sockets:
+            self._sockets[sock.fileno()] = sock
+            self._handlers[sock.fileno()] = add_accept_handler(
+                sock, self._handle_connection)
 
     def add_socket(self, socket: socket.socket) -> None:
-        """Singular version of `add_sockets`.  Takes a single socket object."""
-        pass
+        """
+        Singular version of `add_sockets`.  Takes a single socket object.
+        """
+        self.add_sockets([socket])
 
     def bind(self, port: int, address: Optional[str]=None, family: socket.AddressFamily=socket.AF_UNSPEC, backlog: int=_DEFAULT_BACKLOG, flags: Optional[int]=None, reuse_port: bool=False) -> None:
         """Binds this server to the given port on the given address.
@@ -179,8 +176,9 @@ class TCPServer(object):
         """
         pass
 
-    def start(self, num_processes: Optional[int]=1, max_restarts: Optional[int]=None) -> None:
-        """Starts this server in the `.IOLoop`.
+    def start(self, num_processes: Optional[int] = 1) -> None:
+        """
+        Starts this server in the `.IOLoop`.
 
         By default, we run the server in this process and do not fork any
         additional child process.
@@ -198,31 +196,40 @@ class TCPServer(object):
         which defaults to True when ``debug=True``).
         When using multiple processes, no IOLoops can be created or
         referenced until after the call to ``TCPServer.start(n)``.
-
-        Values of ``num_processes`` other than 1 are not supported on Windows.
-
-        The ``max_restarts`` argument is passed to `.fork_processes`.
-
-        .. versionchanged:: 6.0
-
-           Added ``max_restarts`` argument.
-
-        .. deprecated:: 6.2
-           Use either ``listen()`` or ``add_sockets()`` instead of ``bind()``
-           and ``start()``.
         """
-        pass
+        assert not self._started
+        self._started = True
+        if self._pending_sockets:
+            self.add_sockets(self._pending_sockets)
+            self._pending_sockets = []
+
+        if num_processes is None or num_processes <= 0:
+            num_processes = cpu_count()
+        if num_processes > 1 and ioloop.IOLoop.initialized():
+            raise RuntimeError("Cannot run in multiple processes: IOLoop instance "
+                               "has already been initialized. You cannot call "
+                               "IOLoop.instance() before calling start()")
+        if num_processes > 1:
+            fork_processes(num_processes)
+        else:
+            assert num_processes == 1
+            self._run_thread = threading.Thread(target=self._run)
+            self._run_thread.start()
 
     def stop(self) -> None:
-        """Stops listening for new connections.
+        """
+        Stops listening for new connections.
 
         Requests currently in progress may still continue after the
         server is stopped.
         """
-        pass
+        for fd, sock in self._sockets.items():
+            self.io_loop.remove_handler(fd)
+            sock.close()
 
     def handle_stream(self, stream: IOStream, address: tuple) -> Optional[Awaitable[None]]:
-        """Override to handle a new `.IOStream` from an incoming connection.
+        """
+        Override this method to handle a new `.IOStream` from an incoming connection.
 
         This method may be a coroutine; if so any exceptions it raises
         asynchronously will be logged. Accepting of incoming connections
@@ -233,7 +240,11 @@ class TCPServer(object):
         `.SSLIOStream.wait_for_handshake` if you need to verify the client's
         certificate or use NPN/ALPN.
 
-        .. versionchanged:: 4.2
-           Added the option for this method to be a coroutine.
+        Args:
+            stream: An `.IOStream` for the newly connected socket.
+            address: The address of the client that has connected.
+
+        Returns:
+            Optional[Awaitable[None]]: If this method is a coroutine, it must return an awaitable.
         """
-        pass
+        raise NotImplementedError()
