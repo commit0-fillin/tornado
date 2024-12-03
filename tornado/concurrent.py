@@ -69,7 +69,15 @@ def run_on_executor(*args: Any, **kwargs: Any) -> Callable:
 
        The ``callback`` argument was removed.
     """
-    pass
+    def wrapper(f):
+        @functools.wraps(f)
+        def wrapped(*args, **kwargs):
+            self = args[0]
+            executor = getattr(self, kwargs.pop('executor', 'executor'))
+            return asyncio.get_event_loop().run_in_executor(executor, functools.partial(f, *args, **kwargs))
+        return wrapped
+
+    return wrapper(args[0]) if args and callable(args[0]) else wrapper
 _NO_RESULT = object()
 
 def chain_future(a: 'Future[_T]', b: 'Future[_T]') -> None:
@@ -84,7 +92,18 @@ def chain_future(a: 'Future[_T]', b: 'Future[_T]') -> None:
        `concurrent.futures.Future`.
 
     """
-    pass
+    def copy(future):
+        if b.done():
+            return
+        if future.exception() is not None:
+            b.set_exception(future.exception())
+        else:
+            b.set_result(future.result())
+
+    if isinstance(a, asyncio.Future):
+        a.add_done_callback(copy)
+    else:
+        a.add_done_callback(lambda f: asyncio.get_event_loop().call_soon_threadsafe(copy, f))
 
 def future_set_result_unless_cancelled(future: 'Union[futures.Future[_T], Future[_T]]', value: _T) -> None:
     """Set the given ``value`` as the `Future`'s result, if not cancelled.
@@ -94,7 +113,8 @@ def future_set_result_unless_cancelled(future: 'Union[futures.Future[_T], Future
 
     .. versionadded:: 5.0
     """
-    pass
+    if not future.cancelled():
+        future.set_result(value)
 
 def future_set_exception_unless_cancelled(future: 'Union[futures.Future[_T], Future[_T]]', exc: BaseException) -> None:
     """Set the given ``exc`` as the `Future`'s exception.
@@ -110,7 +130,10 @@ def future_set_exception_unless_cancelled(future: 'Union[futures.Future[_T], Fut
     .. versionadded:: 6.0
 
     """
-    pass
+    if future.cancelled():
+        app_log.error("Exception after Future was cancelled", exc_info=exc)
+    else:
+        future.set_exception(exc)
 
 def future_set_exc_info(future: 'Union[futures.Future[_T], Future[_T]]', exc_info: Tuple[Optional[type], Optional[BaseException], Optional[types.TracebackType]]) -> None:
     """Set the given ``exc_info`` as the `Future`'s exception.
@@ -126,7 +149,13 @@ def future_set_exc_info(future: 'Union[futures.Future[_T], Future[_T]]', exc_inf
        (previously ``asyncio.InvalidStateError`` would be raised)
 
     """
-    pass
+    if not future.cancelled():
+        if hasattr(future, 'set_exc_info'):
+            # Tornado's Future
+            future.set_exc_info(exc_info)
+        else:
+            # asyncio Future
+            future.set_exception(exc_info[1])
 
 def future_add_done_callback(future: 'Union[futures.Future[_T], Future[_T]]', callback: Callable[..., None]) -> None:
     """Arrange to call ``callback`` when ``future`` is complete.
@@ -139,4 +168,7 @@ def future_add_done_callback(future: 'Union[futures.Future[_T], Future[_T]]', ca
 
     .. versionadded:: 5.0
     """
-    pass
+    if future.done():
+        callback(future)
+    else:
+        future.add_done_callback(callback)
