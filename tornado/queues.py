@@ -124,11 +124,11 @@ class Queue(Generic[_T]):
     @property
     def maxsize(self) -> int:
         """Number of items allowed in the queue."""
-        pass
+        return self._maxsize
 
     def qsize(self) -> int:
         """Number of items in the queue."""
-        pass
+        return len(self._queue)
 
     def put(self, item: _T, timeout: Optional[Union[float, datetime.timedelta]]=None) -> 'Future[None]':
         """Put an item into the queue, perhaps waiting until there is room.
@@ -141,14 +141,27 @@ class Queue(Generic[_T]):
         `datetime.timedelta` object for a deadline relative to the
         current time.
         """
-        pass
+        future = Future()
+        try:
+            self.put_nowait(item)
+        except QueueFull:
+            self._putters.append((item, future))
+            IOLoop.current().add_timeout(timeout, self._put_timeout, future)
+        else:
+            future.set_result(None)
+        return future
 
     def put_nowait(self, item: _T) -> None:
         """Put an item into the queue without blocking.
 
         If no free slot is immediately available, raise `QueueFull`.
         """
-        pass
+        if self.full():
+            raise QueueFull()
+        self._queue.append(item)
+        self._notify_getters()
+        self._unfinished_tasks += 1
+        self._finished.clear()
 
     def get(self, timeout: Optional[Union[float, datetime.timedelta]]=None) -> Awaitable[_T]:
         """Remove and return an item from the queue.
@@ -171,7 +184,13 @@ class Queue(Generic[_T]):
            with other timeouts in Tornado).
 
         """
-        pass
+        future = Future()
+        try:
+            future.set_result(self.get_nowait())
+        except QueueEmpty:
+            self._getters.append(future)
+            IOLoop.current().add_timeout(timeout, self._get_timeout, future)
+        return future
 
     def get_nowait(self) -> _T:
         """Remove and return an item from the queue without blocking.
@@ -179,7 +198,11 @@ class Queue(Generic[_T]):
         Return an item if one is immediately available, else raise
         `QueueEmpty`.
         """
-        pass
+        if not self._queue:
+            raise QueueEmpty()
+        item = self._queue.popleft()
+        self._notify_putters()
+        return item
 
     def task_done(self) -> None:
         """Indicate that a formerly enqueued task is complete.
@@ -193,7 +216,11 @@ class Queue(Generic[_T]):
 
         Raises `ValueError` if called more times than `.put`.
         """
-        pass
+        if self._unfinished_tasks <= 0:
+            raise ValueError('task_done() called too many times')
+        self._unfinished_tasks -= 1
+        if self._unfinished_tasks == 0:
+            self._finished.set()
 
     def join(self, timeout: Optional[Union[float, datetime.timedelta]]=None) -> Awaitable[None]:
         """Block until all items in the queue are processed.
@@ -201,7 +228,7 @@ class Queue(Generic[_T]):
         Returns an awaitable, which raises `tornado.util.TimeoutError` after a
         timeout.
         """
-        pass
+        return self._finished.wait(timeout)
 
     def __aiter__(self) -> _QueueIterator[_T]:
         return _QueueIterator(self)
