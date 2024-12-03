@@ -270,7 +270,7 @@ class AsyncHTTPTestCase(AsyncTestCase):
         """Should be overridden by subclasses to return a
         `tornado.web.Application` or other `.HTTPServer` callback.
         """
-        pass
+        raise NotImplementedError()
 
     def fetch(self, path: str, raise_error: bool=False, **kwargs: Any) -> HTTPResponse:
         """Convenience method to synchronously fetch a URL.
@@ -306,24 +306,30 @@ class AsyncHTTPTestCase(AsyncTestCase):
            response codes.
 
         """
-        pass
+        if path.startswith(('http://', 'https://')):
+            url = path
+        else:
+            url = self.get_url(path)
+        
+        self.http_client.fetch(url, self.stop, raise_error=raise_error, **kwargs)
+        return self.wait()
 
     def get_httpserver_options(self) -> Dict[str, Any]:
         """May be overridden by subclasses to return additional
         keyword arguments for the server.
         """
-        pass
+        return {}
 
     def get_http_port(self) -> int:
         """Returns the port used by the server.
 
         A new port is chosen for each test.
         """
-        pass
+        return self.http_server.port
 
     def get_url(self, path: str) -> str:
         """Returns an absolute url for the given path on the test server."""
-        pass
+        return f"http://localhost:{self.get_http_port()}{path}"
 
 class AsyncHTTPSTestCase(AsyncHTTPTestCase):
     """A test case that starts an HTTPS server.
@@ -336,7 +342,14 @@ class AsyncHTTPSTestCase(AsyncHTTPTestCase):
 
         By default includes a self-signed testing certificate.
         """
-        pass
+        # Testing keys were generated with:
+        # openssl req -new -keyout localhost.key -out localhost.csr -subj '/CN=localhost'
+        # openssl x509 -req -days 3650 -in localhost.csr -signkey localhost.key -out localhost.crt
+        module_dir = os.path.dirname(__file__)
+        return dict(
+            certfile=os.path.join(module_dir, 'test', 'localhost.crt'),
+            keyfile=os.path.join(module_dir, 'test', 'localhost.key'),
+        )
 
 def gen_test(func: Optional[Callable[..., Union[Generator, 'Coroutine']]]=None, timeout: Optional[float]=None) -> Union[Callable[..., None], Callable[[Callable[..., Union[Generator, 'Coroutine']]], Callable[..., None]]]:
     """Testing equivalent of ``@gen.coroutine``, to be applied to test methods.
@@ -374,7 +387,22 @@ def gen_test(func: Optional[Callable[..., Union[Generator, 'Coroutine']]]=None, 
        on functions with arguments.
 
     """
-    pass
+    if timeout is None:
+        timeout = get_async_test_timeout()
+
+    def wrapper(f):
+        @functools.wraps(f)
+        def wrapped(self, *args, **kwargs):
+            future = gen.convert_yielded(f(self, *args, **kwargs))
+            if timeout:
+                future = gen.with_timeout(datetime.timedelta(seconds=timeout), future)
+            self.io_loop.run_sync(lambda: future)
+        return wrapped
+
+    if func is not None:
+        return wrapper(func)
+    return wrapper
+
 gen_test.__test__ = False
 
 class ExpectLog(logging.Filter):
