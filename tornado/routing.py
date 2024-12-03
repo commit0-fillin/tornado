@@ -182,7 +182,7 @@ class Router(httputil.HTTPServerConnectionDelegate):
         :returns: an instance of `~.httputil.HTTPMessageDelegate` that will be used to
             process the request.
         """
-        pass
+        raise NotImplementedError("Router subclasses must implement find_handler()")
 
 class ReversibleRouter(Router):
     """Abstract router interface for routers that can handle named routes
@@ -197,7 +197,7 @@ class ReversibleRouter(Router):
         :arg args: url parameters.
         :returns: parametrized url string for a given route name (or ``None``).
         """
-        pass
+        raise NotImplementedError("Router subclasses must implement reverse_url()")
 
 class _RoutingDelegate(httputil.HTTPMessageDelegate):
 
@@ -253,7 +253,14 @@ class RuleRouter(Router):
         :arg rules: a list of Rule instances (or tuples of arguments, which are
             passed to Rule constructor).
         """
-        pass
+        for rule in rules:
+            if isinstance(rule, (tuple, list)):
+                assert len(rule) in (2, 3, 4)
+                if isinstance(rule[0], str):
+                    rule = Rule(PathMatches(rule[0]), *rule[1:])
+                else:
+                    rule = Rule(*rule)
+            self.rules.append(self.process_rule(rule))
 
     def process_rule(self, rule: 'Rule') -> 'Rule':
         """Override this method for additional preprocessing of each rule.
@@ -261,7 +268,7 @@ class RuleRouter(Router):
         :arg Rule rule: a rule to be processed.
         :returns: the same or modified Rule instance.
         """
-        pass
+        return rule
 
     def get_target_delegate(self, target: Any, request: httputil.HTTPServerRequest, **target_params: Any) -> Optional[httputil.HTTPMessageDelegate]:
         """Returns an instance of `~.httputil.HTTPMessageDelegate` for a
@@ -273,7 +280,14 @@ class RuleRouter(Router):
         :arg target_params: additional parameters that can be useful
             for `~.httputil.HTTPMessageDelegate` creation.
         """
-        pass
+        if isinstance(target, httputil.HTTPServerConnectionDelegate):
+            return target.start_request(request.server_connection, request.connection)
+        elif callable(target):
+            return _CallableAdapter(target, request.connection)
+        elif isinstance(target, Router):
+            return target.find_handler(request, **target_params)
+        else:
+            return None
 
 class ReversibleRuleRouter(ReversibleRouter, RuleRouter):
     """A rule-based router that implements ``reverse_url`` method.
@@ -330,11 +344,11 @@ class Matcher(object):
             An empty dict is a valid (and common) return value to indicate a match
             when the argument-passing features are not used.
             ``None`` must be returned to indicate that there is no match."""
-        pass
+        raise NotImplementedError("Matcher subclasses must implement match()")
 
     def reverse(self, *args: Any) -> Optional[str]:
         """Reconstructs full url from matcher instance and additional arguments."""
-        pass
+        return None
 
 class AnyMatches(Matcher):
     """Matches any request."""
@@ -378,7 +392,26 @@ class PathMatches(Matcher):
         For example: Given the url pattern /([0-9]{4})/([a-z-]+)/, this method
         would return ('/%s/%s/', 2).
         """
-        pass
+        pattern = self.regex.pattern
+        if pattern.startswith('^'):
+            pattern = pattern[1:]
+        if pattern.endswith('$'):
+            pattern = pattern[:-1]
+
+        if not pattern.startswith('/'):
+            pattern = '/' + pattern
+
+        group_count = len(self.regex.groupindex)
+
+        if group_count == 0:
+            group_count = self.regex.groups
+        elif group_count < self.regex.groups:
+            raise ValueError("url has unnamed groups in %r" % self.regex.pattern)
+
+        reverse_pattern = re.sub(r'\\.', lambda m: m.group(0), pattern)
+        reverse_pattern = re.sub(r'[^(]*\((?!\?)', '%s', reverse_pattern)
+        reverse_pattern = re.sub(r'\([^)]*\)', '', reverse_pattern)
+        return reverse_pattern, group_count
 
 class URLSpec(Rule):
     """Specifies mappings between URLs and handlers.
@@ -422,4 +455,6 @@ def _unquote_or_none(s: Optional[str]) -> Optional[bytes]:
     Note that args are passed as bytes so the handler can decide what
     encoding to use.
     """
-    pass
+    if s is None:
+        return None
+    return utf8(url_unescape(s))
