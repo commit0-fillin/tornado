@@ -99,7 +99,26 @@ class OpenIdMixin(object):
             longer returns an awaitable object. It is now an ordinary
             synchronous function.
         """
-        pass
+        args = {
+            'openid.ns': 'http://specs.openid.net/auth/2.0',
+            'openid.claimed_id': 'http://specs.openid.net/auth/2.0/identifier_select',
+            'openid.identity': 'http://specs.openid.net/auth/2.0/identifier_select',
+            'openid.return_to': callback_uri or self.request.full_url(),
+            'openid.realm': self.request.protocol + '://' + self.request.host + '/',
+            'openid.mode': 'checkid_setup',
+        }
+        
+        if ax_attrs:
+            args.update({
+                'openid.ns.ax': 'http://openid.net/srv/ax/1.0',
+                'openid.ax.mode': 'fetch_request',
+            })
+            for i, attr in enumerate(ax_attrs):
+                args['openid.ax.type.r' + str(i)] = 'http://axschema.org/' + attr
+                args['openid.ax.required.r' + str(i)] = 'true'
+        
+        url = self._OPENID_ENDPOINT + '?' + urllib.parse.urlencode(args)
+        self.redirect(url)
 
     async def get_authenticated_user(self, http_client: Optional[httpclient.AsyncHTTPClient]=None) -> Dict[str, Any]:
         """Fetches the authenticated user data upon redirect.
@@ -117,7 +136,27 @@ class OpenIdMixin(object):
             The ``callback`` argument was removed. Use the returned
             awaitable object instead.
         """
-        pass
+        if http_client is None:
+            http_client = self.get_auth_http_client()
+        
+        args = {
+            'openid.ns': 'http://specs.openid.net/auth/2.0',
+            'openid.mode': 'check_authentication',
+        }
+        args.update(dict((k, v[-1]) for k, v in self.request.arguments.items()
+                         if k.startswith('openid.')))
+
+        response = await http_client.fetch(
+            self._OPENID_ENDPOINT,
+            method='POST',
+            body=urllib.parse.urlencode(args)
+        )
+
+        parsed = urllib.parse.parse_qs(response.body.decode('utf-8'))
+        if parsed['is_valid'][0] == 'true':
+            return self._get_user_info(parsed)
+        else:
+            raise AuthError('Invalid OpenID response')
 
     def get_auth_http_client(self) -> httpclient.AsyncHTTPClient:
         """Returns the `.AsyncHTTPClient` instance to be used for auth requests.
@@ -125,7 +164,28 @@ class OpenIdMixin(object):
         May be overridden by subclasses to use an HTTP client other than
         the default.
         """
-        pass
+        return httpclient.AsyncHTTPClient()
+
+    def _get_user_info(self, parsed):
+        user = {}
+        ax_ns = None
+        for name, values in parsed.items():
+            if name.startswith('openid.ns.') and values[0] == 'http://openid.net/srv/ax/1.0':
+                ax_ns = name[10:]
+                break
+
+        if ax_ns:
+            for name, values in parsed.items():
+                if not name.startswith('openid.' + ax_ns + '.type.'):
+                    continue
+                i = name[21:]
+                value_name = 'openid.' + ax_ns + '.value.' + i
+                if value_name in parsed:
+                    key = parsed[name][0].split('/')[-1]
+                    value = parsed[value_name][0]
+                    user[key] = value
+
+        return user
 
 class OAuthMixin(object):
     """Abstract implementation of OAuth 1.0 and 1.0a.
