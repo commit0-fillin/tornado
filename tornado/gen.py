@@ -132,7 +132,21 @@ def coroutine(func: Union[Callable[..., 'Generator[Any, Any, _T]'], Callable[...
        awaitable object instead.
 
     """
-    pass
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        future = Future()
+        try:
+            result = func(*args, **kwargs)
+            if isinstance(result, Generator):
+                Runner(asyncio.get_event_loop().run_in_executor, result, future, next(result))
+            elif isawaitable(result):
+                chain_future(result, future)
+            else:
+                future.set_result(result)
+        except Exception as e:
+            future.set_exception(e)
+        return future
+    return wrapper
 
 def is_coroutine_function(func: Any) -> bool:
     """Return whether *func* is a coroutine function, i.e. a function
@@ -140,7 +154,8 @@ def is_coroutine_function(func: Any) -> bool:
 
     .. versionadded:: 4.5
     """
-    pass
+    return (asyncio.iscoroutinefunction(func) or
+            (hasattr(func, '__wrapped__') and asyncio.iscoroutinefunction(func.__wrapped__)))
 
 class Return(Exception):
     """Special exception to return a value from a `coroutine`.
@@ -242,7 +257,7 @@ class WaitIterator(object):
 
     def done(self) -> bool:
         """Returns True if this iterator has no more results."""
-        pass
+        return len(self._unfinished) == 0 and len(self._finished) == 0
 
     def next(self) -> Future:
         """Returns a `.Future` that will yield the next available result.
@@ -250,13 +265,23 @@ class WaitIterator(object):
         Note that this `.Future` will not be the same object as any of
         the inputs.
         """
-        pass
+        if self._finished:
+            return self._return_result(self._finished.popleft())
+        elif self._unfinished:
+            self._running_future = Future()
+            return self._running_future
+        else:
+            raise StopIteration()
 
     def _return_result(self, done: Future) -> Future:
         """Called set the returned future's state that of the future
         we yielded, and set the current future for the iterator.
         """
-        pass
+        self.current_future = done
+        self.current_index = self._unfinished.pop(done)
+        result = Future()
+        chain_future(done, result)
+        return result
 
     def __aiter__(self) -> typing.AsyncIterator:
         return self
@@ -311,7 +336,30 @@ def multi(children: Union[List[_Yieldable], Dict[Any, _Yieldable]], quiet_except
        other than ``YieldPoint`` and `.Future`.
 
     """
-    pass
+    if isinstance(children, dict):
+        keys = list(children.keys())
+        children_seq = list(children.values())
+    else:
+        keys = None
+        children_seq = children
+    
+    children_futures = [convert_yielded(i) for i in children_seq]
+    future = Future()
+    
+    def callback(f):
+        try:
+            result_list = f.result()
+            if keys is not None:
+                future_set_result_unless_cancelled(future, dict(zip(keys, result_list)))
+            else:
+                future_set_result_unless_cancelled(future, result_list)
+        except Exception as e:
+            future_set_exc_info(future, sys.exc_info())
+    
+    gather_future = asyncio.gather(*children_futures)
+    IOLoop.current().add_future(gather_future, callback)
+    
+    return future
 Multi = multi
 
 def multi_future(children: Union[List[_Yieldable], Dict[Any, _Yieldable]], quiet_exceptions: 'Union[Type[Exception], Tuple[Type[Exception], ...]]'=()) -> 'Union[Future[List], Future[Dict]]':
@@ -329,7 +377,7 @@ def multi_future(children: Union[List[_Yieldable], Dict[Any, _Yieldable]], quiet
     .. deprecated:: 4.3
        Use `multi` instead.
     """
-    pass
+    return multi(children, quiet_exceptions)
 
 def maybe_future(x: Any) -> Future:
     """Converts ``x`` into a `.Future`.
@@ -344,7 +392,12 @@ def maybe_future(x: Any) -> Future:
        Instead of `maybe_future`, check for the non-future result types
        you expect (often just ``None``), and ``yield`` anything unknown.
     """
-    pass
+    if is_future(x):
+        return x
+    else:
+        fut = Future()
+        fut.set_result(x)
+        return fut
 
 def with_timeout(timeout: Union[float, datetime.timedelta], future: _Yieldable, quiet_exceptions: 'Union[Type[Exception], Tuple[Type[Exception], ...]]'=()) -> Future:
     """Wraps a `.Future` (or other yieldable object) in a timeout.
@@ -379,7 +432,25 @@ def with_timeout(timeout: Union[float, datetime.timedelta], future: _Yieldable, 
        ``tornado.util.TimeoutError`` is now an alias to ``asyncio.TimeoutError``.
 
     """
-    pass
+    future = convert_yielded(future)
+    result = Future()
+    chain_future(future, result)
+    io_loop = IOLoop.current()
+    
+    def on_timeout():
+        result.set_exception(TimeoutError("Timeout"))
+    
+    timeout_handle = io_loop.add_timeout(timeout, on_timeout)
+    
+    def on_complete(f):
+        io_loop.remove_timeout(timeout_handle)
+        if not result.done():
+            chain_future(f, result)
+        elif not isinstance(f.exception(), (asyncio.CancelledError,) + tuple(quiet_exceptions)):
+            app_log.error("Exception in Future %r after timeout", f, exc_info=True)
+    
+    future_add_done_callback(future, on_complete)
+    return result
 
 def sleep(duration: float) -> 'Future[None]':
     """Return a `.Future` that resolves after the given number of seconds.
@@ -395,7 +466,9 @@ def sleep(duration: float) -> 'Future[None]':
 
     .. versionadded:: 4.1
     """
-    pass
+    f = Future()
+    IOLoop.current().call_later(duration, lambda: f.set_result(None))
+    return f
 
 class _NullFuture(object):
     """_NullFuture resembles a Future that finished with a result of None.
@@ -438,7 +511,40 @@ class Runner(object):
         """Starts or resumes the generator, running until it reaches a
         yield point that is not ready.
         """
-        pass
+        if self.running or self.finished:
+            return
+        try:
+            self.running = True
+            while True:
+                if self.future is None:
+                    self.future = self.ctx_run(self.gen.throw, *sys.exc_info())
+                else:
+                    try:
+                        orig_stack_contexts = stack_context._state.contexts
+                        yielded = self.ctx_run(self.gen.send, self.future.result())
+                        if stack_context._state.contexts is not orig_stack_contexts:
+                            self.gen.throw(
+                                stack_context.StackContextInconsistentError(
+                                    "stack_context inconsistency (probably caused "
+                                    "by yield within a 'with' statement)"
+                                )
+                            )
+                    except StopIteration as e:
+                        self.finished = True
+                        self.future = _null_future
+                        self.result_future.set_result(getattr(e, 'value', None))
+                        self.result_future = None
+                        return
+                if self.ctx_run(self.handle_yield, yielded):
+                    return
+                self.future = None
+        except Exception:
+            self.finished = True
+            self.result_future.set_exc_info(sys.exc_info())
+            self.result_future = None
+            return
+        finally:
+            self.running = False
 
 def convert_yielded(yielded: _Yieldable) -> Future:
     """Convert a yielded object into a `.Future`.
@@ -457,5 +563,12 @@ def convert_yielded(yielded: _Yieldable) -> Future:
     .. versionadded:: 4.1
 
     """
-    pass
+    if isinstance(yielded, (list, dict)):
+        return multi(yielded)
+    elif is_future(yielded):
+        return yielded
+    elif isawaitable(yielded):
+        return asyncio.ensure_future(yielded)
+    else:
+        return Future().set_result(yielded)
 convert_yielded = singledispatch(convert_yielded)
