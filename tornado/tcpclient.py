@@ -56,7 +56,15 @@ class _Connector(object):
         be AF_INET and the other AF_INET6, although non-standard resolvers
         may return additional families).
         """
-        pass
+        primary = []
+        secondary = []
+        primary_af = addrinfo[0][0]
+        for af, addr in addrinfo:
+            if af == primary_af:
+                primary.append((af, addr))
+            else:
+                secondary.append((af, addr))
+        return primary, secondary
 
 class TCPClient(object):
     """A non-blocking TCP connection factory.
@@ -99,4 +107,17 @@ class TCPClient(object):
         .. versionchanged:: 5.0
            Added the ``timeout`` argument.
         """
-        pass
+        addrinfo = await self.resolver.resolve(host, port, af)
+        connector = _Connector(addrinfo, self._create_stream)
+        
+        if timeout is not None:
+            if isinstance(timeout, datetime.timedelta):
+                timeout = timeout.total_seconds()
+            connector.timeout = self.io_loop.time() + timeout
+
+        stream = await connector.start()
+        
+        if ssl_options is not None:
+            stream = await stream.start_tls(False, ssl_options=ssl_options, server_hostname=host)
+        
+        return stream
