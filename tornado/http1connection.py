@@ -247,30 +247,43 @@ class HTTP1ServerConnection(object):
 
         Returns a `.Future` that resolves after the serving loop has exited.
         """
-        pass
+        if self.stream is not None:
+            self.stream.close()
+        if self._serving_future is not None:
+            await self._serving_future
 
     def start_serving(self, delegate: httputil.HTTPServerConnectionDelegate) -> None:
         """Starts serving requests on this connection.
 
         :arg delegate: a `.HTTPServerConnectionDelegate`
         """
-        pass
+        self._serving_future = asyncio.ensure_future(self._serve_requests(delegate))
+
 DIGITS = re.compile('[0-9]+')
 HEXDIGITS = re.compile('[0-9a-fA-F]+')
 
 def parse_int(s: str) -> int:
     """Parse a non-negative integer from a string."""
-    pass
+    if DIGITS.fullmatch(s):
+        return int(s)
+    raise httputil.HTTPInputError("Invalid integer %r" % s)
 
 def parse_hex_int(s: str) -> int:
     """Parse a non-negative hexadecimal integer from a string."""
-    pass
+    if HEXDIGITS.fullmatch(s):
+        return int(s, 16)
+    raise httputil.HTTPInputError("Invalid hex integer %r" % s)
 
 def is_transfer_encoding_chunked(headers: httputil.HTTPHeaders) -> bool:
     """Returns true if the headers specify Transfer-Encoding: chunked.
 
     Raise httputil.HTTPInputError if any other transfer encoding is used.
     """
-    pass
+    transfer_encoding = headers.get("Transfer-Encoding")
+    if transfer_encoding:
+        if transfer_encoding.lower() == "chunked":
+            return True
+        raise httputil.HTTPInputError("Unknown Transfer-Encoding: %s" % transfer_encoding)
+    return False
     def __enter__(self):
         return self
