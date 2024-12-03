@@ -441,7 +441,7 @@ class Lock(object):
     >>> async def f():
     ...    async with lock:
     ...        # Do something holding the lock.
-    ...        pass
+    ...        await asyncio.sleep(0)  # Simulate some work
     ...
     ...    # Now the lock is released.
 
@@ -451,7 +451,7 @@ class Lock(object):
     >>> async def f2():
     ...    with (yield lock.acquire()):
     ...        # Do something holding the lock.
-    ...        pass
+    ...        await asyncio.sleep(0)  # Simulate some work
     ...
     ...    # Now the lock is released.
 
