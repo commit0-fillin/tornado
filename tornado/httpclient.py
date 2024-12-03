@@ -96,7 +96,9 @@ class HTTPClient(object):
 
     def close(self) -> None:
         """Closes the HTTPClient, freeing any resources used."""
-        pass
+        if not self._closed:
+            self._io_loop.close()
+            self._closed = True
 
     def fetch(self, request: Union['HTTPRequest', str], **kwargs: Any) -> 'HTTPResponse':
         """Executes a request, returning an `HTTPResponse`.
@@ -108,7 +110,20 @@ class HTTPClient(object):
         If an error occurs during the fetch, we raise an `HTTPError` unless
         the ``raise_error`` keyword argument is set to False.
         """
-        pass
+        if isinstance(request, str):
+            request = HTTPRequest(request, **kwargs)
+        elif kwargs:
+            raise ValueError("kwargs can't be used if request is an HTTPRequest object")
+        
+        response = self._io_loop.run_sync(lambda: self._async_client.fetch(request))
+        
+        if isinstance(response, Exception):
+            if kwargs.get('raise_error', True):
+                raise response
+            else:
+                return HTTPResponse(request, 599, error=response,
+                                    request_time=response.request_time)
+        return response
 
 class AsyncHTTPClient(Configurable):
     """An non-blocking HTTP client.
@@ -177,7 +192,10 @@ class AsyncHTTPClient(Configurable):
         ``close()``.
 
         """
-        pass
+        if self._instance_cache is not None:
+            if self in self._instance_cache.values():
+                del self._instance_cache[self.io_loop]
+        self._instance_cache = None
 
     def fetch(self, request: Union[str, 'HTTPRequest'], raise_error: bool=True, **kwargs: Any) -> 'Future[HTTPResponse]':
         """Executes a request, asynchronously returning an `HTTPResponse`.
@@ -208,7 +226,28 @@ class AsyncHTTPClient(Configurable):
            `HTTPError` raised when a non-200 response code is used,
            instead of suppressing all errors.
         """
-        pass
+        if isinstance(request, str):
+            request = HTTPRequest(request, **kwargs)
+        elif kwargs:
+            raise ValueError("kwargs can't be used if request is an HTTPRequest object")
+        
+        future = self._async_client.fetch(request)
+        
+        if raise_error:
+            def handle_response(response_future):
+                try:
+                    response = response_future.result()
+                    if response.error:
+                        response.rethrow()
+                    return response
+                except Exception as e:
+                    if not isinstance(e, HTTPError) or e.code != 599:
+                        raise
+                    return e
+            
+            return future.then(handle_response)
+        else:
+            return future
 
     @classmethod
     def configure(cls, impl: 'Union[None, str, Type[Configurable]]', **kwargs: Any) -> None:
@@ -230,7 +269,7 @@ class AsyncHTTPClient(Configurable):
 
            AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
         """
-        pass
+        super(AsyncHTTPClient, cls).configure(impl, **kwargs)
 
 class HTTPRequest(object):
     """HTTP client request object."""
@@ -468,13 +507,14 @@ class HTTPResponse(object):
                 self.error = None
         else:
             self.error = error
-        self.start_time = start_time
-        self.request_time = request_time
+        self.start_time = start_time or time.time()
+        self.request_time = request_time or (time.time() - self.start_time)
         self.time_info = time_info or {}
 
     def rethrow(self) -> None:
         """If there was an error on the request, raise an `HTTPError`."""
-        pass
+        if self.error:
+            raise self.error
 
     def __repr__(self) -> str:
         args = ','.join(('%s=%r' % i for i in sorted(self.__dict__.items())))
