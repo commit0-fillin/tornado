@@ -213,7 +213,14 @@ def filter_whitespace(mode: str, text: str) -> str:
 
     .. versionadded:: 4.3
     """
-    pass
+    if mode == "all":
+        return text
+    elif mode == "single":
+        return re.sub(r'[^\S\n]+', ' ', text)
+    elif mode == "oneline":
+        return re.sub(r'\s+', ' ', text)
+    else:
+        raise ValueError(f"Unsupported whitespace mode: {mode}")
 
 class Template(object):
     """A compiled template.
@@ -275,7 +282,27 @@ class Template(object):
 
     def generate(self, **kwargs: Any) -> bytes:
         """Generate this template with the given arguments."""
-        pass
+        namespace = {
+            "escape": escape.xhtml_escape,
+            "url_escape": escape.url_escape,
+            "json_encode": escape.json_encode,
+            "squeeze": escape.squeeze,
+            "linkify": escape.linkify,
+            "datetime": datetime,
+            "_tt_utf8": escape.utf8,  # for internal use
+            "_tt_string_types": (unicode_type, bytes),
+            "_tt_modules": ObjectDict(),
+        }
+        namespace.update(self.namespace)
+        namespace.update(kwargs)
+        exec(self.compiled, namespace)
+        execute = namespace["_tt_execute"]
+        try:
+            return execute()
+        except Exception:
+            formatted_code = _format_code(self.code).rstrip()
+            app_log.error("%s code:\n%s", self.name, formatted_code)
+            raise
 
 class BaseLoader(object):
     """Base class for template loaders.
@@ -309,15 +336,26 @@ class BaseLoader(object):
 
     def reset(self) -> None:
         """Resets the cache of compiled templates."""
-        pass
+        with self.lock:
+            self.templates.clear()
 
     def resolve_path(self, name: str, parent_path: Optional[str]=None) -> str:
         """Converts a possibly-relative path to absolute (used internally)."""
-        pass
+        if parent_path and not parent_path.startswith("<") and \
+           not parent_path.startswith("/") and \
+           not name.startswith("/"):
+            current_path = os.path.join(os.path.dirname(parent_path), name)
+            file_dir = os.path.dirname(os.path.abspath(parent_path))
+            return os.path.normpath(os.path.join(file_dir, current_path))
+        return name
 
     def load(self, name: str, parent_path: Optional[str]=None) -> Template:
         """Loads a template."""
-        pass
+        name = self.resolve_path(name, parent_path=parent_path)
+        with self.lock:
+            if name not in self.templates:
+                self.templates[name] = self._create_template(name)
+            return self.templates[name]
 
 class Loader(BaseLoader):
     """A template loader that loads from a single root directory."""
@@ -325,6 +363,7 @@ class Loader(BaseLoader):
     def __init__(self, root_directory: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.root = os.path.abspath(root_directory)
+        self._load_template = self._create_template
 
 class DictLoader(BaseLoader):
     """A template loader that loads from a dictionary."""
