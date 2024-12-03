@@ -59,5 +59,6 @@ def install() -> None:
        ``asyncio`` reactor instead.
 
     """
-    pass
+    from twisted.internet import asyncioreactor
+    asyncioreactor.install()
 if hasattr(gen.convert_yielded, 'register'):
