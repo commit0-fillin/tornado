@@ -142,7 +142,9 @@ class IOLoop(Configurable):
 
         .. deprecated:: 5.0
         """
-        pass
+        warnings.warn("IOLoop.instance() is deprecated, use IOLoop.current() instead",
+                      DeprecationWarning, stacklevel=2)
+        return IOLoop.current()
 
     def install(self) -> None:
         """Deprecated alias for `make_current()`.
@@ -156,7 +158,9 @@ class IOLoop(Configurable):
 
         .. deprecated:: 5.0
         """
-        pass
+        warnings.warn("IOLoop.install() is deprecated, use IOLoop.make_current() instead",
+                      DeprecationWarning, stacklevel=2)
+        self.make_current()
 
     @staticmethod
     def clear_instance() -> None:
@@ -172,7 +176,9 @@ class IOLoop(Configurable):
         .. deprecated:: 5.0
 
         """
-        pass
+        warnings.warn("IOLoop.clear_instance() is deprecated, use IOLoop.clear_current() instead",
+                      DeprecationWarning, stacklevel=2)
+        IOLoop.clear_current()
 
     @staticmethod
     def current(instance: bool=True) -> Optional['IOLoop']:
@@ -199,7 +205,19 @@ class IOLoop(Configurable):
            It is deprecated to call ``IOLoop.current()`` when no `asyncio`
            event loop is running.
         """
-        pass
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            if not instance:
+                return None
+            loop = asyncio.get_event_loop_policy().get_event_loop()
+
+        try:
+            return IOLoop._ioloop_for_asyncio[loop]
+        except KeyError:
+            if instance:
+                return IOLoop(loop=loop)
+            return None
 
     def make_current(self) -> None:
         """Makes this the `IOLoop` for the current thread.
